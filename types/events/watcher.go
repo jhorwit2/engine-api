@@ -1,8 +1,6 @@
 package events
 
 import (
-	"sync"
-
 	goevents "github.com/docker/go-events"
 	"golang.org/x/net/context"
 )
@@ -23,18 +21,13 @@ type Watcher interface {
 	//
 	// Cancel the context to quit watching the events on this channel
 	Watch(ctx context.Context, matcher ...MatcherFunc) <-chan Message
-
-	// Stop will close every channel returned by watch. Stop will
-	// not return until all channels have been closed succesfully.
-	Stop()
 }
 
 type watcher struct {
 	broadcast *goevents.Broadcaster
 	events    <-chan Message
 	buffer    int
-	shutdown  chan struct{}
-	wg        sync.WaitGroup
+	context   context.Context
 }
 
 func (w *watcher) Watch(ctx context.Context, matchers ...MatcherFunc) <-chan Message {
@@ -66,9 +59,7 @@ func (w *watcher) createSinkWrapper(ctx context.Context, matcher goevents.Matche
 		sink = goevents.NewFilter(sink, matcher)
 	}
 
-	w.wg.Add(1)
 	cleanup := func() {
-		w.wg.Done()
 		close(eventq)
 		w.broadcast.Remove(sink)
 		ch.Close()
@@ -82,7 +73,7 @@ func (w *watcher) createSinkWrapper(ctx context.Context, matcher goevents.Matche
 
 		for {
 			select {
-			case <-w.shutdown:
+			case <-w.context.Done():
 				return
 			case <-ctx.Done():
 				return
@@ -91,7 +82,7 @@ func (w *watcher) createSinkWrapper(ctx context.Context, matcher goevents.Matche
 				select {
 				case <-ctx.Done():
 					return
-				case <-w.shutdown:
+				case <-w.context.Done():
 					return
 				case eventq <- e.(Message):
 				}
@@ -103,12 +94,10 @@ func (w *watcher) createSinkWrapper(ctx context.Context, matcher goevents.Matche
 }
 
 func (w *watcher) startWatching() {
-	w.wg.Add(1)
-	defer w.wg.Done()
 
 	for {
 		select {
-		case <-w.shutdown:
+		case <-w.context.Done():
 			return
 		case e, ok := <-w.events:
 			if !ok {
@@ -116,7 +105,7 @@ func (w *watcher) startWatching() {
 			}
 
 			select {
-			case <-w.shutdown:
+			case <-w.context.Done():
 				return
 			default:
 				w.broadcast.Write(e)
@@ -125,25 +114,18 @@ func (w *watcher) startWatching() {
 	}
 }
 
-func (w *watcher) Stop() {
-	if w.shutdown != nil {
-		close(w.shutdown)
-		w.wg.Wait()
-	}
-}
-
 // NewWatcher returns a new event watcher for the given channel.
 // buffer should be specified to allow every channel returned by watch
 // to buffer events.
 //
-// It's up to the caller to close the events channel
-// and call Stop() in the event of an error or the stream is done.
-func NewWatcher(events <-chan Message, buffer int) Watcher {
+// It's up to the caller to stop the watcher by canceling the context. By
+// canceling the context all the channels returned by Watch will be closed.
+func NewWatcher(ctx context.Context, events <-chan Message, buffer int) Watcher {
 	w := &watcher{
+		context:   ctx,
 		buffer:    buffer,
 		broadcast: goevents.NewBroadcaster(),
 		events:    events,
-		shutdown:  make(chan struct{}),
 	}
 	go w.startWatching()
 	return w
