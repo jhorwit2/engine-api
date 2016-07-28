@@ -27,7 +27,7 @@ type watcher struct {
 	broadcast *goevents.Broadcaster
 	events    <-chan Message
 	buffer    int
-	context   context.Context
+	closed    chan struct{}
 }
 
 func (w *watcher) Watch(ctx context.Context, matchers ...MatcherFunc) <-chan Message {
@@ -73,7 +73,7 @@ func (w *watcher) createSinkWrapper(ctx context.Context, matcher goevents.Matche
 
 		for {
 			select {
-			case <-w.context.Done():
+			case <-w.closed:
 				return
 			case <-ctx.Done():
 				return
@@ -82,7 +82,7 @@ func (w *watcher) createSinkWrapper(ctx context.Context, matcher goevents.Matche
 				select {
 				case <-ctx.Done():
 					return
-				case <-w.context.Done():
+				case <-w.closed:
 					return
 				case eventq <- e.(Message):
 				}
@@ -93,11 +93,11 @@ func (w *watcher) createSinkWrapper(ctx context.Context, matcher goevents.Matche
 	return eventq
 }
 
-func (w *watcher) startWatching() {
-
+func (w *watcher) startWatching(ctx context.Context) {
+	defer close(w.closed)
 	for {
 		select {
-		case <-w.context.Done():
+		case <-ctx.Done():
 			return
 		case e, ok := <-w.events:
 			if !ok {
@@ -105,7 +105,7 @@ func (w *watcher) startWatching() {
 			}
 
 			select {
-			case <-w.context.Done():
+			case <-ctx.Done():
 				return
 			default:
 				w.broadcast.Write(e)
@@ -122,11 +122,11 @@ func (w *watcher) startWatching() {
 // canceling the context all the channels returned by Watch will be closed.
 func NewWatcher(ctx context.Context, events <-chan Message, buffer int) Watcher {
 	w := &watcher{
-		context:   ctx,
 		buffer:    buffer,
 		broadcast: goevents.NewBroadcaster(),
 		events:    events,
+		closed:    make(chan struct{}),
 	}
-	go w.startWatching()
+	go w.startWatching(ctx)
 	return w
 }
